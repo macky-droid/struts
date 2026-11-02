@@ -36,12 +36,20 @@ import org.apache.struts2.config.entities.ActionConfig;
 import org.apache.struts2.config.entities.PackageConfig;
 import org.apache.struts2.config.entities.ResultConfig;
 import org.apache.struts2.config.impl.DefaultConfiguration;
+import org.apache.struts2.config.StrutsXmlConfigurationProvider;
 import org.apache.struts2.inject.Container;
+
+import static org.assertj.core.api.Assertions.assertThat;
 
 /**
  * DefaultActionMapper test case.
  */
 public class DefaultActionMapperTest extends StrutsInternalTestCase {
+
+    private static final String EXTENSION_CONFIG = "org/apache/struts2/config/providers/struts-extension.xml";
+    private static final String EXTENSION_RELOAD_CONFIG = "org/apache/struts2/config/providers/struts-extension-reload.xml";
+    private static final String EXTENSION_DEFAULT_ACTION_CONFIG = "org/apache/struts2/config/providers/struts-extension-default-action.xml";
+    private static final String EXTENSION_BANG_CONFIG = "org/apache/struts2/config/providers/struts-extension-bang.xml";
 
     private MockHttpServletRequest req;
     private ConfigurationManager configManager;
@@ -65,6 +73,10 @@ public class DefaultActionMapperTest extends StrutsInternalTestCase {
                 return config;
             }
         };
+    }
+
+    public void testSupportsDeclaredExtensions() {
+        assertTrue(new DefaultActionMapper().supportsDeclaredExtensions());
     }
 
     public void testGetMapping() {
@@ -995,6 +1007,215 @@ public class DefaultActionMapperTest extends StrutsInternalTestCase {
 
         // then
         assertEquals("error", result);
+    }
+
+    public void testDeclaredExtensionClaimedForResolvingAction() {
+        loadConfigurationProviders(new StrutsXmlConfigurationProvider(EXTENSION_CONFIG));
+
+        ActionMapping mapping = mapDeclared(declaredMapper(), "/child/inherits.html");
+
+        assertThat(mapping.getName()).isEqualTo("inherits");
+        assertThat(mapping.getNamespace()).isEqualTo("/child");
+        assertThat(mapping.getExtension()).isEqualTo("html");
+    }
+
+    public void testDeclaredExtensionNotClaimedForStaticFile() {
+        loadConfigurationProviders(new StrutsXmlConfigurationProvider(EXTENSION_CONFIG));
+
+        assertThat(mapDeclared(declaredMapper(), "/index.html")).isNull();
+    }
+
+    public void testDeclaredOnlyExtensionNotClaimedForUndeclaredAction() {
+        loadConfigurationProviders(new StrutsXmlConfigurationProvider(EXTENSION_CONFIG));
+
+        assertThat(mapDeclared(declaredMapper(), "/plain/undeclared.html")).isNull();
+    }
+
+    public void testDeclaredActionClaimsOtherDeclaredExtension() {
+        loadConfigurationProviders(new StrutsXmlConfigurationProvider(EXTENSION_CONFIG));
+
+        ActionMapping mapping = mapDeclared(declaredMapper(), "/child/inherits.json");
+
+        assertThat(mapping.getName()).isEqualTo("inherits");
+        assertThat(mapping.getExtension()).isEqualTo("json");
+    }
+
+    public void testGlobalExtensionUnchanged() {
+        loadConfigurationProviders(new StrutsXmlConfigurationProvider(EXTENSION_CONFIG));
+
+        ActionMapping mapping = mapDeclared(declaredMapper(), "/plain/undeclared.action");
+
+        assertThat(mapping.getName()).isEqualTo("undeclared");
+        assertThat(mapping.getExtension()).isEqualTo("action");
+    }
+
+    public void testDmiNameWithDeclaredExtension() {
+        loadConfigurationProviders(new StrutsXmlConfigurationProvider(EXTENSION_CONFIG));
+        DefaultActionMapper mapper = declaredMapper();
+        mapper.setAllowDynamicMethodCalls("true");
+
+        ActionMapping mapping = mapDeclared(mapper, "/child/inherits!foo.html");
+
+        assertThat(mapping.getName()).isEqualTo("inherits");
+        assertThat(mapping.getMethod()).isEqualTo("foo");
+        assertThat(mapping.getExtension()).isEqualTo("html");
+    }
+
+    public void testNamespaceFallbackWithDeclaredExtension() {
+        loadConfigurationProviders(new StrutsXmlConfigurationProvider(EXTENSION_CONFIG));
+        assertThat(configurationManager.getConfiguration().getRuntimeConfiguration().getActionConfig("/other", "thing")).isNotNull();
+
+        ActionMapping mapping = mapDeclared(declaredMapper(), "/other/thing.html");
+
+        assertThat(mapping.getName()).isEqualTo("thing");
+        assertThat(mapping.getExtension()).isEqualTo("html");
+    }
+
+    public void testWildcardWithDeclaredExtension() {
+        loadConfigurationProviders(new StrutsXmlConfigurationProvider(EXTENSION_CONFIG));
+
+        ActionMapping mapping = mapDeclared(declaredMapper(), "/wild/edit_user.html");
+
+        assertThat(mapping.getName()).isEqualTo("edit_user");
+        assertThat(mapping.getExtension()).isEqualTo("html");
+    }
+
+    public void testGlobalNullStillStripsDeclared() {
+        loadConfigurationProviders(new StrutsXmlConfigurationProvider(EXTENSION_CONFIG));
+        DefaultActionMapper mapper = new DefaultActionMapper();
+        mapper.setExtensions("");
+
+        ActionMapping declared = mapDeclared(mapper, "/child/inherits.html");
+        assertThat(declared.getName()).isEqualTo("inherits");
+        assertThat(declared.getExtension()).isEqualTo("html");
+
+        ActionMapping literal = mapDeclared(mapper, "/plain/foo.bar");
+        assertThat(literal.getName()).isEqualTo("foo.bar");
+        assertThat(literal.getExtension()).isNull();
+    }
+
+    public void testCacheFollowsReload() {
+        loadConfigurationProviders(new StrutsXmlConfigurationProvider(EXTENSION_CONFIG));
+        DefaultActionMapper mapper = declaredMapper();
+        assertThat(mapDeclared(mapper, "/child/inherits.html")).isNotNull();
+
+        loadConfigurationProviders(new StrutsXmlConfigurationProvider(EXTENSION_RELOAD_CONFIG));
+
+        assertThat(mapDeclared(mapper, "/child/inherits.html")).isNull();
+        assertThat(mapDeclared(mapper, "/child/inherits.json").getExtension()).isEqualTo("json");
+    }
+
+    public void testDeclaringDefaultActionDoesNotClaimStaticFile() {
+        loadConfigurationProviders(new StrutsXmlConfigurationProvider(EXTENSION_DEFAULT_ACTION_CONFIG));
+
+        assertThat(mapDeclared(declaredMapper(), "/docs/manual.html")).isNull();
+        assertThat(mapDeclared(declaredMapper(), "/manual.html")).isNull();
+    }
+
+    public void testDeclaringDefaultActionClaimsItsOwnName() {
+        loadConfigurationProviders(new StrutsXmlConfigurationProvider(EXTENSION_DEFAULT_ACTION_CONFIG));
+
+        ActionMapping mapping = mapDeclared(declaredMapper(), "/index.html");
+
+        assertThat(mapping.getName()).isEqualTo("index");
+        assertThat(mapping.getExtension()).isEqualTo("html");
+    }
+
+    public void testWildcardBesideDeclaringDefaultActionStillClaimed() {
+        loadConfigurationProviders(new StrutsXmlConfigurationProvider(EXTENSION_DEFAULT_ACTION_CONFIG));
+
+        ActionMapping mapping = mapDeclared(declaredMapper(), "/edit_user.html");
+
+        assertThat(mapping.getName()).isEqualTo("edit_user");
+        assertThat(mapping.getExtension()).isEqualTo("html");
+    }
+
+    public void testDeclaredEmptyExtensionReachableWhenGlobalListLacksIt() {
+        loadConfigurationProviders(new StrutsXmlConfigurationProvider(EXTENSION_CONFIG));
+        DefaultActionMapper mapper = new DefaultActionMapper();
+        mapper.setExtensions("action");
+
+        ActionMapping mapping = mapDeclared(mapper, "/plain/none");
+
+        assertThat(mapping.getName()).isEqualTo("none");
+        assertThat(mapping.getNamespace()).isEqualTo("/plain");
+        assertThat(mapping.getExtension()).isNull();
+    }
+
+    public void testUndeclaredActionStaysUnreachableWithoutExtensionWhenGlobalListLacksEmpty() {
+        loadConfigurationProviders(new StrutsXmlConfigurationProvider(EXTENSION_CONFIG));
+        DefaultActionMapper mapper = new DefaultActionMapper();
+        mapper.setExtensions("action");
+
+        assertThat(mapDeclared(mapper, "/plain/undeclared")).isNull();
+        assertThat(mapDeclared(mapper, "/plain/undeclared.action").getName()).isEqualTo("undeclared");
+    }
+
+    public void testDeclaringDefaultActionDoesNotClaimDisallowedName() {
+        loadConfigurationProviders(new StrutsXmlConfigurationProvider(EXTENSION_DEFAULT_ACTION_CONFIG));
+
+        assertThat(mapDeclared(declaredMapper(), "/manual(1).html")).isNull();
+    }
+
+    public void testDeclaringDefaultActionDoesNotClaimDisallowedNameWithSlashes() {
+        loadConfigurationProviders(new StrutsXmlConfigurationProvider(EXTENSION_DEFAULT_ACTION_CONFIG));
+        DefaultActionMapper mapper = declaredMapper();
+        mapper.setSlashesInActionNames("true");
+
+        assertThat(mapDeclared(mapper, "/x(1)/index.html")).isNull();
+    }
+
+    public void testDeclaringDefaultActionClaimsItsOwnNameWithSlashes() {
+        loadConfigurationProviders(new StrutsXmlConfigurationProvider(EXTENSION_DEFAULT_ACTION_CONFIG));
+        DefaultActionMapper mapper = declaredMapper();
+        mapper.setSlashesInActionNames("true");
+
+        ActionMapping mapping = mapDeclared(mapper, "/index.html");
+
+        assertThat(mapping.getName()).isEqualTo("index");
+        assertThat(mapping.getExtension()).isEqualTo("html");
+    }
+
+    public void testDeclaredExtensionClaimedForLiteralBangNameWithoutDmi() {
+        loadConfigurationProviders(new StrutsXmlConfigurationProvider(EXTENSION_BANG_CONFIG));
+
+        ActionMapping mapping = mapDeclared(declaredMapper(), "/bang-only/report!daily.html");
+
+        assertThat(mapping.getName()).isEqualTo("report!daily");
+        assertThat(mapping.getMethod()).isNull();
+        assertThat(mapping.getExtension()).isEqualTo("html");
+    }
+
+    public void testDeclaredExtensionClaimedForDmiName() {
+        loadConfigurationProviders(new StrutsXmlConfigurationProvider(EXTENSION_BANG_CONFIG));
+        DefaultActionMapper mapper = declaredMapper();
+        mapper.setAllowDynamicMethodCalls("true");
+
+        ActionMapping mapping = mapDeclared(mapper, "/dmi/report!daily.html");
+
+        assertThat(mapping.getName()).isEqualTo("report");
+        assertThat(mapping.getMethod()).isEqualTo("daily");
+        assertThat(mapping.getExtension()).isEqualTo("html");
+    }
+
+    public void testDeclaredExtensionProbeSplitsDmiNameAtLastBang() {
+        loadConfigurationProviders(new StrutsXmlConfigurationProvider(EXTENSION_BANG_CONFIG));
+        DefaultActionMapper mapper = declaredMapper();
+        mapper.setAllowDynamicMethodCalls("true");
+
+        assertThat(mapDeclared(mapper, "/dmi/report!x!daily.html")).isNull();
+    }
+
+    private DefaultActionMapper declaredMapper() {
+        DefaultActionMapper mapper = new DefaultActionMapper();
+        mapper.setExtensions("action,");
+        return mapper;
+    }
+
+    private ActionMapping mapDeclared(DefaultActionMapper mapper, String uri) {
+        req.setRequestURI(uri);
+        req.setServletPath(uri);
+        return mapper.getMapping(req, configurationManager);
     }
 
 }

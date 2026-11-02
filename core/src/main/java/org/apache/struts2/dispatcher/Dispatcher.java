@@ -732,7 +732,8 @@ public class Dispatcher {
             init_AliasStandardObjects(); // [7]
             init_DeferredXmlConfigurations();
 
-            getContainer(); // Inject this instance
+            Container container = getContainer(); // Inject this instance
+            warnIfExtensionsIgnoredByMapper(container);
 
             if (!dispatcherListeners.isEmpty()) {
                 for (DispatcherListener l : dispatcherListeners) {
@@ -747,6 +748,20 @@ public class Dispatcher {
         } catch (Exception ex) {
             LOG.error("Dispatcher initialization failed", ex);
             throw new StrutsException(ex);
+        }
+    }
+
+    private void warnIfExtensionsIgnoredByMapper(Container container) {
+        ActionMapper mapper = container.getInstance(ActionMapper.class);
+        if (mapper.supportsDeclaredExtensions()) {
+            return;
+        }
+        boolean declared = container.getInstance(Configuration.class).getRuntimeConfiguration().getActionConfigs().values().stream()
+                .flatMap(actions -> actions.values().stream())
+                .anyMatch(config -> !config.getExtensions().isEmpty());
+        if (declared) {
+            LOG.warn("Actions declare the extension attribute but the configured {} [{}] does not support declared extensions, they are not applied",
+                    ActionMapper.class.getSimpleName(), mapper.getClass().getName());
         }
     }
 

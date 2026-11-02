@@ -21,6 +21,7 @@ package org.apache.struts2.dispatcher.mapper;
 import org.apache.struts2.ActionContext;
 import org.apache.struts2.config.Configuration;
 import org.apache.struts2.config.ConfigurationManager;
+import org.apache.struts2.config.RuntimeConfiguration;
 import org.apache.struts2.config.entities.ActionConfig;
 import org.apache.struts2.config.entities.PackageConfig;
 import org.apache.struts2.inject.Container;
@@ -34,12 +35,12 @@ import org.apache.struts2.RequestUtils;
 import org.apache.struts2.StrutsConstants;
 import org.apache.struts2.util.PrefixTrie;
 
-import java.util.ArrayList;
-import java.util.Collections;
+import java.util.Comparator;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.regex.Pattern;
 
 import static org.apache.commons.lang3.StringUtils.normalizeSpace;
@@ -136,6 +137,8 @@ public class DefaultActionMapper implements ActionMapper {
     private boolean allowActionPrefix = false;
 
     protected List<String> extensions = List.of("action", "");
+
+    private final AtomicReference<DeclaredExtensions> declaredExtensions = new AtomicReference<>();
 
     protected Container container;
 
@@ -247,16 +250,11 @@ public class DefaultActionMapper implements ActionMapper {
     @Inject(StrutsConstants.STRUTS_ACTION_EXTENSION)
     public void setExtensions(String extensions) {
         if (StringUtils.isNotEmpty(extensions)) {
-            List<String> list = new ArrayList<>();
-            String[] tokens = extensions.split(",");
-            Collections.addAll(list, tokens);
-            if (extensions.endsWith(",")) {
-                list.add("");
-            }
-            this.extensions = Collections.unmodifiableList(list);
+            this.extensions = ActionExtensions.parse(extensions);
         } else {
             this.extensions = null;
         }
+        this.declaredExtensions.set(null);
     }
 
     @Override
@@ -264,6 +262,11 @@ public class DefaultActionMapper implements ActionMapper {
         ActionMapping mapping = new ActionMapping();
         mapping.setName(actionName);
         return parseActionName(mapping);
+    }
+
+    @Override
+    public boolean supportsDeclaredExtensions() {
+        return true;
     }
 
     public boolean isSlashesInActionNames() {
@@ -283,7 +286,8 @@ public class DefaultActionMapper implements ActionMapper {
         int indexOfSemicolon = uri.indexOf(';');
         uri = (indexOfSemicolon > -1) ? uri.substring(0, indexOfSemicolon) : uri;
 
-        uri = dropExtension(uri, mapping);
+        String declaredUri = stripDeclaredExtension(uri, mapping, configManager);
+        uri = declaredUri != null ? declaredUri : dropExtension(uri, mapping);
         if (uri == null) {
             return null;
         }
@@ -477,6 +481,102 @@ public class DefaultActionMapper implements ActionMapper {
     }
 
     /**
+     * Strips an extension that only package or action {@code extension} attributes declare, but only when the
+     * remaining URI matches an action (exactly or by wildcard, never through a {@code default-action-ref}) that itself
+     * declares extensions. When only those attributes declare the empty extension, an extensionless URI matching such
+     * an action is returned as is.
+     *
+     * @param uri           the request URI
+     * @param mapping       the action mapping to store the extension in
+     * @param configManager configuration manager
+     * @return the URI without the extension, or {@code null} when no declared-only extension claims it
+     * @since 7.5.0
+     */
+    protected String stripDeclaredExtension(String uri, ActionMapping mapping, ConfigurationManager configManager) {
+        RuntimeConfiguration runtimeConfiguration = configManager.getConfiguration().getRuntimeConfiguration();
+        if (runtimeConfiguration == null) {
+            return null;
+        }
+        DeclaredExtensions declared = declaredExtensions(runtimeConfiguration);
+        for (String ext : declared.declaredOnly) {
+            String suffix = "." + ext;
+            if (uri.endsWith(suffix)) {
+                String candidate = uri.substring(0, uri.length() - suffix.length());
+                if (declaresExtensions(candidate, runtimeConfiguration, configManager)) {
+                    mapping.setExtension(ext);
+                    return candidate;
+                }
+            }
+        }
+        if (declared.emptyDeclaredOnly && hasNoExtension(uri) && declaresExtensions(uri, runtimeConfiguration, configManager)) {
+            return uri;
+        }
+        return null;
+    }
+
+    private boolean declaresExtensions(String candidate, RuntimeConfiguration runtimeConfiguration, ConfigurationManager configManager) {
+        ActionMapping probe = new ActionMapping();
+        parseNameAndNamespace(candidate, probe, configManager);
+        if (!keepsRequestedName(candidate, probe)) {
+            return false;
+        }
+        parseActionName(probe);
+        ActionConfig config = runtimeConfiguration.getMatchedActionConfig(probe.getNamespace(), probe.getName());
+        return config != null && !config.getExtensions().isEmpty();
+    }
+
+    private boolean keepsRequestedName(String uri, ActionMapping probe) {
+        String name = probe.getName();
+        if (!allowSlashesInActionNames) {
+            return uri.substring(uri.lastIndexOf('/') + 1).equals(name);
+        }
+        String namespace = "/".equals(probe.getNamespace()) ? "" : probe.getNamespace();
+        return uri.equals(name) || uri.equals(namespace + "/" + name);
+    }
+
+    private DeclaredExtensions declaredExtensions(RuntimeConfiguration runtimeConfiguration) {
+        DeclaredExtensions cached = declaredExtensions.get();
+        if (cached != null && cached.runtimeConfiguration == runtimeConfiguration) {
+            return cached;
+        }
+        Set<String> declared = new HashSet<>();
+        for (Map<String, ActionConfig> actionConfigs : runtimeConfiguration.getActionConfigs().values()) {
+            for (ActionConfig actionConfig : actionConfigs.values()) {
+                if (!actionConfig.getExtensions().isEmpty()) {
+                    declared.addAll(actionConfig.getExtensions());
+                }
+            }
+        }
+        boolean emptyDeclaredOnly = declared.remove("") && extensions != null && !extensions.contains("");
+        if (extensions != null) {
+            extensions.forEach(declared::remove);
+        }
+        List<String> declaredOnly = declared.stream()
+            .sorted(Comparator.comparingInt(String::length).reversed().thenComparing(Comparator.naturalOrder()))
+            .toList();
+        DeclaredExtensions computed = new DeclaredExtensions(runtimeConfiguration, declaredOnly, emptyDeclaredOnly);
+        declaredExtensions.set(computed);
+        return computed;
+    }
+
+    private static final class DeclaredExtensions {
+        private final RuntimeConfiguration runtimeConfiguration;
+        private final List<String> declaredOnly;
+        private final boolean emptyDeclaredOnly;
+
+        private DeclaredExtensions(RuntimeConfiguration runtimeConfiguration, List<String> declaredOnly, boolean emptyDeclaredOnly) {
+            this.runtimeConfiguration = runtimeConfiguration;
+            this.declaredOnly = declaredOnly;
+            this.emptyDeclaredOnly = emptyDeclaredOnly;
+        }
+    }
+
+    private static boolean hasNoExtension(String name) {
+        int index = name.lastIndexOf('.');
+        return index == -1 || name.indexOf('/', index) >= 0;
+    }
+
+    /**
      * Drops the extension from the action name, storing it in the mapping for later use
      *
      * @param name    The action name
@@ -492,8 +592,7 @@ public class DefaultActionMapper implements ActionMapper {
                 // This should also handle cases such as /foo/bar-1.0/description. It is tricky to
                 // distinquish /foo/bar-1.0 but perhaps adding a numeric check in the future could
                 // work
-                int index = name.lastIndexOf('.');
-                if (index == -1 || name.indexOf('/', index) >= 0) {
+                if (hasNoExtension(name)) {
                     return name;
                 }
             } else {
